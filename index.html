@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Employment Variables by Activity</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; margin: 40px; }
+  #controls { margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 20px; }
+  .control-column { display: flex; flex-direction: column; gap: 10px; min-width: 200px; }
+  .radio-list { max-height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; }
+  .radio-list label { display: block; margin-bottom: 3px; }
+  #chart { margin-top: 20px; }
+  .axis-label { font-size: 14px; font-weight: bold; }
+  .legend text { font-size: 13px; }
+  .tooltip { 
+    position: absolute; 
+    background-color: rgba(0,0,0,0.7); 
+    color: #fff; 
+    padding: 5px 8px; 
+    border-radius: 4px; 
+    pointer-events: none; 
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<h2>Employment Variables by Activity</h2>
+
+<div id="controls">
+  <div class="control-column">
+    <label for="levelSelect"><strong>Level</strong></label>
+    <select id="levelSelect"></select>
+    <label><input type="checkbox" id="transportFilter"> Show only transport-related activities</label>
+    <label><input type="checkbox" id="asiaPacificFilter"> Show Asia-Pacific (ATO) economies only</label>
+    <label><input type="checkbox" id="logToggle"> Use logarithmic scale</label>
+  </div>
+
+  <div class="control-column">
+    <strong>Activity</strong>
+    <div id="activityList" class="radio-list"></div>
+  </div>
+
+  <div class="control-column">
+    <strong>Variable</strong>
+    <div id="variableList" class="radio-list"></div>
+  </div>
+
+  <div class="control-column">
+    <strong>Color by</strong>
+    <label><input type="radio" name="colorGroup" value="economy_incomegroup" checked> Income group</label>
+    <label><input type="radio" name="colorGroup" value="economy_ato_group"> ATO group</label>
+    <label><input type="radio" name="colorGroup" value="economy_ato_subgroup"> ATO subgroup</label>
+  </div>
+</div>
+
+<div id="chart"></div>
+<div id="tooltip" class="tooltip" style="opacity:0;"></div>
+
+<script>
+let margin = { top: 60, right: 200, bottom: 60, left: 100 };
+let width = 800 /*window.innerWidth - margin.left - margin.right - 50;*/
+let height = 800 - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width + margin.left + margin.right)
+  .attr("height", height + margin.top + margin.bottom)
+  .append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const x = d3.scaleLinear().range([0, width]);
+let y = d3.scaleLinear().range([height, 0]);
+const color = d3.scaleOrdinal();
+
+svg.append("g").attr("class", "x-axis").attr("transform", `translate(0,${height})`);
+svg.append("g").attr("class", "y-axis");
+
+svg.append("text")
+  .attr("class", "axis-label")
+  .attr("x", width / 2)
+  .attr("y", -30)
+  .style("text-anchor", "middle")
+  .attr("id", "yLabel");
+
+svg.append("text")
+  .attr("class", "axis-label")
+  .attr("x", width / 2)
+  .attr("y", height + 40)
+  .style("text-anchor", "middle")
+  .text("Year");
+
+const transportActivities = new Set([
+  "Motor vehicles, trailers and semi-trailers","Other transport equipment","Motor vehicles",
+  "Automobile bodies, trailers and semi-trailers","Parts and accessories for motor vehicles",
+  "Building of ships and boats","Railway locomotives and rolling stock","Air and spacecraft and related machinery",
+  "Military fighting vehicles","Transport equipment n.e.c.","Building of ships and floating structures",
+  "Building of pleasure and sporting boats","Motorcycles","Bicycles and invalid carriages",
+  "Other transport equipment n.e.c.","Repair of transport equip., excl. motor vehicles"
+]);
+
+const incomeColorMap = {
+  "High income":"blue",
+  "Upper middle income":"violet",
+  "Lower middle income":"red"
+};
+
+const asiaSubgroupColorMap = {
+  "Central and West Asia":"#1f77b4","East Asia":"#ff7f0e","Pacific":"#2ca02c",
+  "South Asia":"#d62728","South East Asia":"#9467bd","Australia and New Zealand":"#8c564b",
+  "Europe":"gray","Americas":"gray","Africa":"gray","Asia - Others":"gray"
+};
+
+const variableOptions = [
+  'Establishments','Employees','Wages and salaries','Output',
+  'Value added','Gross fixed capital formation','Female employees','Female employee share'
+];
+
+let currentVariable = variableOptions[0];
+let currentActivity = null;
+let currentColorGroup = "economy_incomegroup";
+let logScale = false;
+const tooltip = d3.select("#tooltip");
+
+d3.csv("df_wide.csv").then(data => {
+
+  variableOptions.forEach(v => data.forEach(d => d[v] = +d[v]));
+  data.forEach(d => d.Year = +d.Year);
+
+  const levels = [...new Set(data.map(d => d.level))].sort();
+  d3.select("#levelSelect")
+    .selectAll("option")
+    .data(levels)
+    .join("option")
+    .attr("value", d => d)
+    .text(d => d);
+
+  // Variable radio buttons
+  const containerVar = d3.select("#variableList");
+  variableOptions.forEach(v => {
+    containerVar.append("label")
+      .html(`<input type="radio" name="variable" value="${v}" ${v===currentVariable?'checked':''}> ${v}`);
+  });
+  containerVar.selectAll("input[name='variable']").on("change", function(){
+    currentVariable = this.value;
+    updateChart();
+  });
+
+  function updateActivityList() {
+    const selectedLevel = d3.select("#levelSelect").property("value");
+    let activities = data.filter(d => d.level === selectedLevel);
+
+    if (d3.select("#transportFilter").property("checked")) {
+      activities = activities.filter(d => transportActivities.has(d.Activity));
+    }
+    if (d3.select("#asiaPacificFilter").property("checked")) {
+      activities = activities.filter(d => d.economy_ato_group === "Asia-Pacific (ATO)");
+    }
+
+    const uniqueActivities = Array.from(
+      new Set(activities.map(d => d.ActivityCode + " " + d.Activity))
+    ).sort();
+
+    const container = d3.select("#activityList");
+    container.selectAll("label").remove();
+    uniqueActivities.forEach(a => {
+      container.append("label")
+        .html(`<input type="radio" name="activity" value="${a}"> ${a}`);
+    });
+
+    currentActivity = uniqueActivities[0];
+    container.selectAll("input").property("checked", d => d === currentActivity);
+
+    container.selectAll("input[name='activity']").on("change", function() {
+      currentActivity = this.value;
+      updateChart();
+    });
+  }
+
+  function drawLegend(filteredData) {
+    svg.select(".legend").remove();
+    const legend = svg.append("g")
+      .attr("class","legend")
+      .attr("transform",`translate(${width+40},0)`);
+
+    let groups = [...new Set(filteredData.map(d => d[currentColorGroup]))];
+
+    if (currentColorGroup === "economy_incomegroup") {
+      groups = ["High income","Upper middle income","Lower middle income"];
+      color.domain(groups).range(groups.map(g => incomeColorMap[g]));
+    } else if (currentColorGroup === "economy_ato_group") {
+      color.domain(groups).range(d3.schemeTableau10.concat(d3.schemeSet3));
+    } else {
+      groups.sort();
+      color.domain(groups).range(groups.map(g => asiaSubgroupColorMap[g] || "gray"));
+    }
+
+    groups.forEach((g,i) => {
+      legend.append("circle").attr("cx",0).attr("cy",i*25).attr("r",7).attr("fill",color(g));
+      legend.append("text").attr("x",12).attr("y",i*25+4).text(g);
+    });
+  }
+
+  function updateChart() {
+    const selectedLevel = d3.select("#levelSelect").property("value");
+
+    let filtered = data.filter(d =>
+      d.level === selectedLevel &&
+      (d.ActivityCode + " " + d.Activity) === currentActivity
+    );
+
+    if (d3.select("#transportFilter").property("checked"))
+      filtered = filtered.filter(d => transportActivities.has(d.Activity));
+
+    if (d3.select("#asiaPacificFilter").property("checked"))
+      filtered = filtered.filter(d => d.economy_ato_group === "Asia-Pacific (ATO)");
+
+    const years = Array.from(new Set(filtered.map(d => d.Year))).sort((a,b)=>a-b);
+    x.domain([d3.min(years), d3.max(years)]);
+    svg.select(".x-axis")
+      .transition().duration(500)
+      .call(d3.axisBottom(x).tickValues(years).tickFormat(d3.format("d")));
+
+    if (logScale) {
+      const yMin = d3.min(filtered.filter(d => d[currentVariable] > 0), d => d[currentVariable]);
+      const yMax = d3.max(filtered, d => d[currentVariable]);
+      y = d3.scaleLog().range([height,0]).clamp(true).domain([yMin, yMax*1.1]);
+    } else {
+      const yMax = d3.max(filtered, d => d[currentVariable]);
+      y = d3.scaleLinear().range([height,0]).domain([0, yMax*1.1]);
+    }
+
+    svg.select(".y-axis")
+      .transition().duration(500)
+      .call(logScale ? d3.axisLeft(y).ticks(10, "~s") : d3.axisLeft(y));
+
+    svg.select("#yLabel").text(`${currentVariable} - ${currentActivity}`);
+    drawLegend(filtered);
+
+    const countries = [...new Set(filtered.map(d => d.Country))];
+
+    // Lines
+    const lines = svg.selectAll(".line-group").data(countries, d=>d);
+    lines.join(
+      enter => {
+        const g = enter.append("g").attr("class","line-group");
+        g.append("path").attr("class","line").attr("fill","none").attr("stroke-width",2);
+        return g;
+      },
+      update => update,
+      exit => exit.remove()
+    );
+
+    lines.select(".line")
+      .transition().duration(500)
+      .attr("stroke", d => color(filtered.find(f => f.Country===d)[currentColorGroup]))
+      .attr("d", d => {
+        const lineData = filtered.filter(f=>f.Country===d).sort((a,b)=>a.Year-b.Year);
+        return d3.line()
+          .x(d=>x(d.Year))
+          .y(d=>y(d[currentVariable]))(lineData);
+      });
+
+    // Dots
+    const circles = svg.selectAll(".dot").data(filtered, d=>d.Country+d.Year);
+    circles.join(
+      enter => enter.append("circle")
+        .attr("class","dot")
+        .attr("r",4)
+        .attr("fill", d=>color(d[currentColorGroup]))
+        .on("mouseover", (event,d)=>{
+          tooltip.transition().duration(200).style("opacity",0.9);
+          tooltip.html(`${d.Country}<br>Year: ${d.Year}<br>${currentVariable}: ${d[currentVariable]}`)
+            .style("left",(event.pageX+10)+"px")
+            .style("top",(event.pageY-28)+"px");
+        })
+        .on("mouseout", ()=>tooltip.transition().duration(500).style("opacity",0)),
+      update => update.transition().duration(500)
+        .attr("cx", d=>x(d.Year))
+        .attr("cy", d=>y(d[currentVariable]))
+        .attr("fill", d=>color(d[currentColorGroup])),
+      exit => exit.remove()
+    );
+
+    // Labels
+    const endPoints = countries.map(c=>{
+      const lineData = filtered.filter(f=>f.Country===c).sort((a,b)=>a.Year-b.Year);
+      const lastPoint = lineData[lineData.length-1];
+      return {Country:c, x:x(lastPoint.Year), y:y(lastPoint[currentVariable])};
+    });
+
+    const labels = svg.selectAll(".country-label").data(endPoints,d=>d.Country);
+    labels.join(
+      enter => enter.append("text")
+        .attr("class","country-label")
+        .attr("x", d=>d.x+5)
+        .attr("y", d=>d.y)
+        .text(d=>d.Country)
+        .attr("font-size","12px")
+        .attr("alignment-baseline","middle"),
+      update => update.transition().duration(500)
+        .attr("x", d=>d.x+5)
+        .attr("y", d=>d.y)
+        .text(d=>d.Country),
+      exit => exit.remove()
+    );
+  }
+
+  // Event listeners
+  d3.select("#levelSelect").on("change", ()=>{ updateActivityList(); updateChart(); });
+  d3.select("#transportFilter").on("change", ()=>{ updateActivityList(); updateChart(); });
+  d3.select("#asiaPacificFilter").on("change", ()=>{ updateActivityList(); updateChart(); });
+  d3.select("#logToggle").on("change", ()=>{ logScale=d3.select("#logToggle").property("checked"); updateChart(); });
+  d3.selectAll("input[name='colorGroup']").on("change", function(){ currentColorGroup=this.value; updateChart(); });
+
+  updateActivityList();
+  updateChart();
+
+  window.addEventListener("resize", ()=>{
+    width = window.innerWidth - margin.left - margin.right - 50;
+    x.range([0,width]);
+    svg.attr("width", width + margin.left + margin.right);
+    updateChart();
+  });
+
+});
+</script>
+</body>
+</html>
